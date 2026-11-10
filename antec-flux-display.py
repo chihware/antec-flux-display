@@ -10,7 +10,7 @@ import logging
 import math
 from pathlib import Path
 import signal
-import time
+from threading import Event
 
 from flux_sensors import load_settings, read_sensor, list_sensors
 
@@ -107,18 +107,17 @@ def report_readings(readings, previous):
 
 
 def run_display(settings, once=False):
-    running = True
+    stopped = Event()
 
     def stop(_signum, _frame):
-        nonlocal running
-        running = False
+        stopped.set()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     device = None
     previous = {}
     try:
-        while running:
+        while not stopped.is_set():
             readings = sample(settings)
             report_readings(readings, previous)
             if once and any(r.temperature is None or encode_temperature(r.temperature) == [0xEE] * 3 for r in readings):
@@ -134,7 +133,7 @@ def run_display(settings, once=False):
                         if previous.get('usb') != 'missing':
                             LOG.warning('Antec display missing; waiting for USB connection')
                         previous['usb'] = 'missing'
-                        time.sleep(settings.reconnect_interval)
+                        stopped.wait(settings.reconnect_interval)
                         continue
                     previous['usb'] = 'connected'
                     LOG.info('Connected to Antec display 2022:0522')
@@ -151,9 +150,9 @@ def run_display(settings, once=False):
                 device = None
                 if once:
                     return 1
-                time.sleep(settings.reconnect_interval)
+                stopped.wait(settings.reconnect_interval)
                 continue
-            time.sleep(settings.interval)
+            stopped.wait(settings.interval)
     finally:
         close_display(device)
     return 0

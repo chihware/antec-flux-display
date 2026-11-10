@@ -178,13 +178,13 @@ class USBTests(unittest.TestCase):
         stop = {}
         def save_handler(signum, handler):
             stop[signum] = handler
-        def sleep(_seconds):
+        def wait(_seconds):
             if second.write.called:
                 stop[signal.SIGTERM](signal.SIGTERM, None)
         with patch.object(display, 'sample', return_value=self.readings), \
              patch.object(display, 'open_display', side_effect=[first, second]) as opened, \
              patch.object(display.signal, 'signal', side_effect=save_handler), \
-             patch.object(display.time, 'sleep', side_effect=sleep):
+             patch.object(display.Event, 'wait', side_effect=wait):
             self.assertEqual(display.run_display(sensors.Settings()), 0)
         self.assertEqual(opened.call_count, 2)
         self.assertEqual(self.fake.util.dispose_resources.call_count, 2)
@@ -199,6 +199,124 @@ class USBTests(unittest.TestCase):
             display.open_display()
         device.write.assert_not_called()
         device.attach_kernel_driver.assert_called_once_with(0)
+
+
+    # Value: protects=USB configuration tolerates EBUSY and missing device retries;
+    # fails_when=already-configured devices rejected or missing device never retried;
+    # why_new=existing open path only asserts wrong endpoint; seam=none;
+    # no_claim=kernel USB behavior; fake devices and waits.
+    def test_open_busy_configuration_and_missing_device_retry(self):
+        device = Mock()
+        device.is_kernel_driver_active.side_effect = NotImplementedError
+        device.set_configuration.side_effect = self.USBError('busy', 16)
+        device.get_active_configuration.return_value = {(0, 0): [SimpleNamespace(bEndpointAddress=3)]}
+        self.fake.core.find.return_value = device
+        self.assertIs(display.open_display(), device)
+        self.fake.util.claim_interface.assert_called_once_with(device, 0)
+        display.close_display(device)
+        self.fake.util.dispose_resources.assert_called_with(device)
+        self.fake.core.find.return_value = None
+        self.assertIsNone(display.open_display())
+        with patch.object(display, 'sample', return_value=self.readings), patch.object(display, 'open_display', return_value=None):
+            self.assertEqual(display.run_display(sensors.Settings(), once=True), 1)
+        device.write.return_value = 12
+        device._flux_detached = False
+        handlers = {}
+        def save(signum, handler):
+            handlers[signum] = handler
+        def wait(_):
+            if device.write.called:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+        with patch.object(display, 'sample', return_value=self.readings), patch.object(display, 'open_display', side_effect=[None, device]) as opened, patch.object(display.signal, 'signal', side_effect=save), patch.object(display.Event, 'wait', side_effect=wait):
+            self.assertEqual(display.run_display(sensors.Settings()), 0)
+        self.assertEqual(opened.call_count, 2)
+        device.write.assert_called_once_with(3, display.build_packet(45, 52), timeout=1000)
+
+
+class AdditionalContracts(unittest.TestCase):
+    # Value: protects=CLI overrides and invalid readings fail before USB;
+    # fails_when=overrides ignored or invalid input reported successful;
+    # why_new=only valid dry-run previously asserted; seam=none;
+    # no_claim=hardware acceptance; readings mocked.
+    def test_cli_configuration_and_dry_run_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.toml'
+            path.write_text('[gpu]\ndriver="amdgpu"\nlabel="edge"\n')
+            observed = []
+            def read(settings):
+                observed.append(settings)
+                return sensors.Reading(45), sensors.Reading(110)
+            with patch.object(display, 'sample', side_effect=read), patch.object(display, 'open_display', side_effect=AssertionError('USB')), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(display.main(['--config', str(path), '--dry-run', '--gpu-pci', '03:00.0', '--gpu-sensor', 'junction', '--cpu-sensor', 'Tctl']), 1)
+            self.assertEqual(observed[0].gpu, sensors.SensorConfig('amdgpu', '03:00.0', 'junction'))
+            self.assertEqual(observed[0].cpu.label, 'Tctl')
+            for text in ('not valid TOML', '[gpu]\ndriver=3', '[gpu]\nlabel=""', 'gpu=3'):
+                path.write_text(text)
+                with self.subTest(text=text), patch.object(display, 'sample', side_effect=AssertionError('sample')), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as error:
+                        display.main(['--config', str(path), '--dry-run'])
+                    self.assertEqual(error.exception.code, 2)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                display.main(['--config', str(path.with_name('missing')), '--dry-run'])
+
+    # Value: protects=unlabeled defaults and explicit GPU fallback identity;
+    # fails_when=default lost or forbidden NVIDIA fallback occurs;
+    # why_new=labeled device fixtures only; seam=none;
+    # no_claim=real sysfs permissions; temporary sensor files.
+    def test_sensor_default_and_fallback_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hwmon = root / 'hwmon0'
+            hwmon.mkdir()
+            (hwmon / 'name').write_text('amdgpu')
+            (hwmon / 'temp1_input').write_text('45000')
+            self.assertEqual(sensors.read_sensor(sensors.SensorConfig('amdgpu'), 'gpu', root).temperature, 45)
+            (hwmon / 'temp1_input').rename(hwmon / 'temp2_input')
+            self.assertIsNone(sensors.read_sensor(sensors.SensorConfig('amdgpu'), 'gpu', root).temperature)
+            with patch.object(sensors, 'nvidia_reading', return_value=sensors.Reading(52)) as backend:
+                self.assertEqual(sensors.read_sensor(sensors.SensorConfig('nvidia', '03:00.0'), 'gpu', root).temperature, 52)
+                backend.assert_called_once_with('0000:03:00.0')
+                backend.reset_mock()
+                self.assertIsNone(sensors.read_sensor(sensors.SensorConfig('nvidia', label='edge'), 'gpu', root).temperature)
+                backend.assert_not_called()
+
+    # Value: protects=NVIDIA failures produce unavailable readings;
+    # fails_when=backend errors escape or invalid values accepted;
+    # why_new=existing NVIDIA test covers identity only; seam=none;
+    # no_claim=driver availability; subprocess mocked.
+    def test_nvidia_failure_table(self):
+        for error in (OSError('missing'), subprocess.TimeoutExpired('nvidia-smi', 3), subprocess.CalledProcessError(1, 'nvidia-smi')):
+            with self.subTest(error=error), patch.object(sensors.subprocess, 'run', side_effect=error):
+                reading = sensors.nvidia_reading()
+                self.assertIsNone(reading.temperature)
+                self.assertTrue(reading.error)
+        for output in ('', 'bad', 'nan', 'inf', '0', '-4'):
+            with self.subTest(output=output), patch.object(sensors.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output, '')):
+                reading = sensors.nvidia_reading()
+                self.assertIsNone(reading.temperature)
+                self.assertTrue(reading.error)
+
+    # Value: protects=warnings describe unavailable/overflow transitions without spam;
+    # fails_when=overflow silent or unchanged status logged repeatedly;
+    # why_new=prior tests did not assert logging; seam=none;
+    # no_claim=journal delivery; captured logger calls.
+    def test_reading_status_warnings(self):
+        previous = {}
+        good = (sensors.Reading(45, 'cpu'), sensors.Reading(52, 'gpu'))
+        with patch.object(display.LOG, 'warning') as warning, patch.object(display.LOG, 'info') as info:
+            display.report_readings(good, previous)
+            self.assertEqual(info.call_count, 2)
+            display.report_readings(good, previous)
+            self.assertEqual(info.call_count, 2)
+            bad = (sensors.Reading(None, 'cpu', 'permission denied'), sensors.Reading(110, 'gpu'))
+            display.report_readings(bad, previous)
+            self.assertEqual(warning.call_count, 2)
+            self.assertIn('permission denied', warning.call_args_list[0].args)
+            self.assertIn('cannot fit', warning.call_args_list[1].args[0])
+            display.report_readings(bad, previous)
+            self.assertEqual(warning.call_count, 2)
+            display.report_readings(good, previous)
+            self.assertEqual(info.call_count, 4)
 
 
 if __name__ == '__main__':
