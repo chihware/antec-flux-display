@@ -1,10 +1,12 @@
-# Antec Flux Pro display for Linux
+# Antec Flux Pro display for Arch Linux and CachyOS
 
 Show CPU and GPU temperatures on the Antec Flux Pro case display without
 Windows/iUnity. This fork adds Arch Linux/CachyOS packaging, configurable
 sensor selection, and diagnostics to
 [Mario Estrada's Fedora implementation](https://github.com/marioestradaf/antec-flux-display).
-The Fedora 44 installer is retained.
+The Fedora 44 installer is retained. This is a community fork, not an official
+Antec driver. The original authors' work makes this Linux support possible;
+see [credits and license](#credits-and-license).
 
 ## Status
 
@@ -44,12 +46,14 @@ device. `--dry-run` exits nonzero if a required reading cannot be displayed.
 
 ## Arch Linux / CachyOS
 
-The package recipe is in `packaging/arch/PKGBUILD`. It checks out a pinned
-source commit and runs the tests while building. During development, that
-commit must be available in the fork before building from the public URL.
+Install from the fork's `arch-cachyos` branch. This is a source-build package;
+it has not been submitted to the AUR and there is no prebuilt release.
+The recipe in `packaging/arch/PKGBUILD` checks out a pinned source commit and
+runs the tests while building. Inspect the recipe before running `makepkg`.
 
 ```bash
-cd packaging/arch
+git clone --branch arch-cachyos https://github.com/chihware/antec-flux-display.git
+cd antec-flux-display/packaging/arch
 makepkg -si
 antec-flux-display --list-sensors
 sudoedit /etc/antec-flux-display/config.toml
@@ -154,7 +158,22 @@ short writes, reconnection and driver cleanup.
 
 MIT license; preserve the copyright notice in [LICENSE](LICENSE).
 
-Original Python implementation: Mario Estrada. USB protocol research and
-earlier Linux implementations: Nish Tahir and AKoskovich. See
-[Nish's original write-up](https://nishtahir.com/building-an-ubuntu-service-for-my-antec-flux-display/)
-and [Rust implementation](https://github.com/nishtahir/antec-flux-pro-display).
+This project builds on community work; the Arch/CachyOS additions are not the
+original reverse engineering or original Python implementation.
+
+- **[Mario Estrada](https://github.com/marioestradaf/antec-flux-display)**:
+  the upstream Python service, Fedora installer, USB integration and service
+  hardening on which this fork is based. The original MIT copyright notice
+  remains intact in `LICENSE`.
+- **[Nish Tahir](https://github.com/nishtahir/antec-flux-pro-display)**:
+  the original Linux project and
+  [write-up documenting the USB reverse engineering and packet format](https://nishtahir.com/building-an-ubuntu-service-for-my-antec-flux-display/).
+- **[AKoskovich](https://github.com/AKoskovich)**:
+  earlier community work acknowledged by Nish's project and by the Python
+  upstream. See those projects for their original attribution and history.
+- **[Chih's fork](https://github.com/chihware/antec-flux-display)**:
+  Arch/CachyOS packaging and validation, configurable PCI/label sensor selection,
+  diagnostics, reconnection handling and automated tests.
+
+Please preserve the license and these upstream acknowledgements when sharing
+or adapting the project.
