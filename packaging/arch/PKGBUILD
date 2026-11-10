@@ -1,7 +1,7 @@
 # Maintainer: Chih <https://github.com/chihware>
 pkgname=antec-flux-display
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='CPU/GPU temperature display for the Antec Flux Pro case'
 arch=('any')
 url='https://github.com/chihware/antec-flux-display'
@@ -11,7 +11,7 @@ makedepends=('git')
 optdepends=('nvidia-utils: NVIDIA temperature fallback via nvidia-smi')
 conflicts=('af-pro-display' 'af-pro-display-bin')
 backup=('etc/antec-flux-display/config.toml')
-_commit=9618c6e9f2374b625db908b35dbd36358e5e9918
+_commit=322ee0b8fcf28dfcec1d6c5e4878e94f9a76cda0
 source=("antec-flux-display-source::git+$url.git#commit=$_commit")
 sha256sums=('SKIP') # Git source is pinned to the full commit above.
 

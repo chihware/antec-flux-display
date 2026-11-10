@@ -1,7 +1,7 @@
 pkgbase = antec-flux-display
 	pkgdesc = CPU/GPU temperature display for the Antec Flux Pro case
 	pkgver = 0.1.0
-	pkgrel = 1
+	pkgrel = 2
 	url = https://github.com/chihware/antec-flux-display
 	arch = any
 	license = MIT
@@ -14,7 +14,7 @@ pkgbase = antec-flux-display
 	conflicts = af-pro-display
 	conflicts = af-pro-display-bin
 	backup = etc/antec-flux-display/config.toml
-	source = antec-flux-display-source::git+https://github.com/chihware/antec-flux-display.git#commit=9618c6e9f2374b625db908b35dbd36358e5e9918
+	source = antec-flux-display-source::git+https://github.com/chihware/antec-flux-display.git#commit=322ee0b8fcf28dfcec1d6c5e4878e94f9a76cda0
 	sha256sums = SKIP
 
 pkgname = antec-flux-display
