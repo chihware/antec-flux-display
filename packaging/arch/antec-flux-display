@@ -1,0 +1,2 @@
+#!/usr/bin/bash
+exec /usr/bin/python3 /usr/lib/antec-flux-display/antec-flux-display.py "$@"

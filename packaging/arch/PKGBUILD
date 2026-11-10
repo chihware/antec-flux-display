@@ -1,0 +1,35 @@
+# Maintainer: Chih <https://github.com/chihware>
+pkgname=antec-flux-display
+pkgver=0.1.0
+pkgrel=3
+pkgdesc='CPU/GPU temperature display for the Antec Flux Pro case'
+arch=('any')
+url='https://github.com/chihware/antec-flux-display'
+license=('MIT')
+depends=('python>=3.11' 'python-pyusb' 'libusb' 'systemd')
+makedepends=('git')
+optdepends=('nvidia-utils: NVIDIA temperature fallback via nvidia-smi')
+conflicts=('af-pro-display' 'af-pro-display-bin')
+backup=('etc/antec-flux-display/config.toml')
+_commit=8b021658d01fbc92e3014e51b905a9e6281943d4
+source=("antec-flux-display-source::git+$url.git#commit=$_commit")
+sha256sums=('SKIP') # Git source is pinned to the full commit above.
+
+check() {
+    cd "$srcdir/antec-flux-display-source"
+    make check
+}
+
+package() {
+    cd "$srcdir/antec-flux-display-source"
+    install -Dm644 antec-flux-display.py "$pkgdir/usr/lib/$pkgname/antec-flux-display.py"
+    install -Dm644 flux_sensors.py "$pkgdir/usr/lib/$pkgname/flux_sensors.py"
+    install -Dm755 packaging/arch/antec-flux-display "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 packaging/arch/antec-flux-display.service "$pkgdir/usr/lib/systemd/system/$pkgname.service"
+    install -Dm644 packaging/arch/antec-flux-display.sysusers "$pkgdir/usr/lib/sysusers.d/$pkgname.conf"
+    install -Dm644 70-antec-flux-display.rules "$pkgdir/usr/lib/udev/rules.d/70-$pkgname.rules"
+    install -Dm644 config.toml "$pkgdir/etc/$pkgname/config.toml"
+    install -Dm644 examples/ryzen-radeon.toml "$pkgdir/usr/share/doc/$pkgname/ryzen-radeon.toml"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
