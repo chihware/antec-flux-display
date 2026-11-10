@@ -10,9 +10,11 @@ The Fedora 44 installer is retained.
 
 Development branch: `arch-cachyos`. Automated tests cover multi-GPU selection,
 hwmon renumbering, unavailable sensors, packet boundaries, and USB reconnection.
-Live sensor selection is checked on CachyOS with a Ryzen 9 9950X and Radeon RX
-7900 XTX alongside the integrated Radeon 610M. Physical-display and installed
-package validation are in progress; reboot and suspend/resume are not yet tested.
+Validated on CachyOS on 2026-11-10 with a Ryzen 9 9950X and Radeon RX 7900 XTX
+alongside the integrated Radeon 610M: both physical readings confirmed, Arch
+package installed, unprivileged service running, and normal service restart
+reconnected successfully. Boot enablement is configured; an actual reboot and
+suspend/resume are not yet tested. See [validation notes](docs/validation-cachyos.md).
 
 ## Hardware and requirements
 
