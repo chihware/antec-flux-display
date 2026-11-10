@@ -1,0 +1,14 @@
+# List hardware identities with: antec-flux-display --list-sensors
+# Multiple GPUs using the same driver require an explicit pci_address.
+[cpu]
+driver = "auto"
+# label = "Tctl"
+
+[gpu]
+driver = "auto"
+# pci_address = "0000:03:00.0"
+# label = "junction"  # AMD hotspot; use "edge" for the regular GPU temperature.
+
+[display]
+interval = 1.0
+reconnect_interval = 2.0

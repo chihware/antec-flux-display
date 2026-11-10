@@ -28,6 +28,7 @@ SCRIPT_DIRECTORY="$(
     pwd -P
 )"
 readonly SOURCE_SCRIPT="${SCRIPT_DIRECTORY}/antec-flux-display.py"
+readonly SOURCE_SENSOR_MODULE="${SCRIPT_DIRECTORY}/flux_sensors.py"
 
 
 function fail() {
@@ -67,7 +68,9 @@ function verify_source_script() {
     [[ -r "${SOURCE_SCRIPT}" ]] ||
         fail "Cannot read ${SOURCE_SCRIPT}"
 
-    /usr/bin/python3 -m py_compile "${SOURCE_SCRIPT}" ||
+    [[ -f "${SOURCE_SENSOR_MODULE}" && ! -L "${SOURCE_SENSOR_MODULE}" ]] ||
+        fail "Missing regular sensor module: ${SOURCE_SENSOR_MODULE}"
+    /usr/bin/python3 -m py_compile "${SOURCE_SCRIPT}" "${SOURCE_SENSOR_MODULE}" ||
         fail "Python syntax validation failed."
 }
 
@@ -128,6 +131,9 @@ function install_service_script() {
         --mode=0755 \
         "${SOURCE_SCRIPT}" \
         "${SCRIPT_DESTINATION}"
+
+    /usr/bin/install --owner=root --group=root --mode=0644 \
+        "${SOURCE_SENSOR_MODULE}" "${INSTALL_DIRECTORY}/flux_sensors.py"
 
     # Apply Fedora's normal SELinux context for this location.
     if command -v restorecon >/dev/null 2>&1; then

@@ -1,0 +1,13 @@
+# Example for the development machine; use --list-sensors on your own PC.
+[cpu]
+driver = "k10temp"
+label = "Tctl"
+
+[gpu]
+driver = "amdgpu"
+pci_address = "0000:03:00.0"
+label = "junction"
+
+[display]
+interval = 1.0
+reconnect_interval = 2.0

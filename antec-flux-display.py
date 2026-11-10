@@ -1,386 +1,203 @@
 #!/usr/bin/env python3
-"""
-Antec Flux Pro Display Service
+"""Send Linux CPU/GPU temperatures to the Antec Flux Pro USB display."""
+from __future__ import annotations
 
-Reads CPU and GPU temperatures from Linux hwmon and sends them to the
-Antec Flux Pro front-panel display over USB.
-
-Requires:
-    python3-pyusb
-    libusb1
-
-USB device:
-    Vendor ID:  2022
-    Product ID: 0522
-"""
-
-import glob
-import subprocess
-import signal
-import sys
-import time
+import argparse
+from dataclasses import asdict, replace
+import errno
+import json
+import logging
+import math
 from pathlib import Path
-from typing import Optional
+import signal
+import time
 
-import usb.core
-import usb.util
-
+from flux_sensors import load_settings, read_sensor, list_sensors
 
 VENDOR_ID = 0x2022
 PRODUCT_ID = 0x0522
 INTERFACE_NUMBER = 0
 ENDPOINT_OUT = 0x03
-
-UPDATE_INTERVAL_SECONDS = 1.0
-USB_WRITE_TIMEOUT_MS = 1_000
-RECONNECT_INTERVAL_SECONDS = 2.0
-NVIDIA_SMI = "/usr/bin/nvidia-smi"
-
-
-def find_hwmon_paths(device_name: str) -> list[Path]:
-    """Return all hwmon paths matching the requested device name."""
-    matching_paths: list[Path] = []
-
-    for hwmon_path_string in glob.glob("/sys/class/hwmon/hwmon*"):
-        hwmon_path = Path(hwmon_path_string)
-
-        try:
-            current_device_name = (hwmon_path / "name").read_text().strip()
-        except (OSError, UnicodeError):
-            continue
-
-        if current_device_name == device_name:
-            matching_paths.append(hwmon_path)
-
-    return matching_paths
+USB_WRITE_TIMEOUT_MS = 1000
+DEFAULT_CONFIG = Path('/etc/antec-flux-display/config.toml')
+LOG = logging.getLogger('antec-flux-display')
+usb = None  # Diagnostics and tests do not require PyUSB or USB access.
 
 
-def find_hwmon_path(device_name: str) -> Optional[Path]:
-    """Return the first hwmon path matching the requested device name."""
-    matching_paths = find_hwmon_paths(device_name)
-    return matching_paths[0] if matching_paths else None
+def encode_temperature(temperature: float | None) -> list[int]:
+    """Encode two integer digits and one decimal, or the missing-data marker.
 
-
-def read_temperature(
-    hwmon_path: Optional[Path],
-    input_file: str = "temp1_input",
-) -> Optional[float]:
-    """Read a temperature from hwmon and return degrees Celsius."""
-    if hwmon_path is None:
-        return None
-
-    try:
-        raw_value = (hwmon_path / input_file).read_text().strip()
-        temperature = int(raw_value) / 1000.0
-    except (OSError, UnicodeError, ValueError):
-        return None
-
-    if temperature <= 0:
-        return None
-
-    return temperature
-
-
-def read_nvidia_smi_temperature() -> Optional[float]:
-    """Read the first NVIDIA GPU temperature from nvidia-smi."""
-    try:
-        result = subprocess.run(
-            [
-                NVIDIA_SMI,
-                "--query-gpu=temperature.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-    output_lines = result.stdout.splitlines()
-    if not output_lines:
-        return None
-
-    first_line = output_lines[0].strip()
-
-    try:
-        temperature = float(first_line)
-    except ValueError:
-        return None
-
-    if temperature <= 0:
-        return None
-
-    return temperature
-
-
-def find_temperature_input_file(
-    hwmon_path: Optional[Path],
-    preferred_label_terms: tuple[str, ...] = (),
-) -> str:
-    """Return the best temp*_input file for a hwmon device."""
-    fallback_input_file = "temp1_input"
-
-    if hwmon_path is None:
-        return fallback_input_file
-
-    input_files = sorted(hwmon_path.glob("temp*_input"))
-    if not input_files:
-        return fallback_input_file
-
-    for input_path in input_files:
-        label_path = input_path.with_name(
-            input_path.name.replace("_input", "_label")
-        )
-
-        try:
-            label = label_path.read_text().strip().lower()
-        except (OSError, UnicodeError):
-            continue
-
-        if any(term in label for term in preferred_label_terms):
-            return input_path.name
-
-    if (hwmon_path / fallback_input_file).exists():
-        return fallback_input_file
-
-    return input_files[0].name
-
-
-def encode_temperature(temperature: Optional[float]) -> list[int]:
+    Never clamp an out-of-range temperature into a plausible displayed value.
     """
-    Encode a temperature as [tens, ones, tenths].
-
-    Missing or invalid temperatures are encoded as 0xEE bytes, which makes
-    the display show --.-.
-    """
-    if temperature is None:
-        return [0xEE, 0xEE, 0xEE]
-
-    clamped_temperature = min(max(temperature, 0.0), 99.9)
-    temperature_tenths = round(clamped_temperature * 10)
-
-    whole_degrees = temperature_tenths // 10
-    tenths = temperature_tenths % 10
-
-    tens = whole_degrees // 10
-    ones = whole_degrees % 10
-
-    return [tens, ones, tenths]
+    if temperature is None or not math.isfinite(temperature) or not 0 < temperature < 100:
+        return [0xEE] * 3
+    tenths = round(temperature * 10)
+    if tenths > 999:
+        return [0xEE] * 3
+    return [tenths // 100, (tenths // 10) % 10, tenths % 10]
 
 
-def build_packet(
-    cpu_temperature: Optional[float],
-    gpu_temperature: Optional[float],
-) -> bytes:
-    """
-    Build the 12-byte display packet.
-
-    Format:
-        55 AA 01 01 06
-        CPU tens, ones, tenths
-        GPU tens, ones, tenths
-        checksum
-    """
+def build_packet(cpu_temperature: float | None, gpu_temperature: float | None) -> bytes:
     payload = [0x55, 0xAA, 0x01, 0x01, 0x06]
-    payload.extend(encode_temperature(cpu_temperature))
-    payload.extend(encode_temperature(gpu_temperature))
-    payload.append(sum(payload) & 0xFF)
-
-    return bytes(payload)
+    payload += encode_temperature(cpu_temperature) + encode_temperature(gpu_temperature)
+    return bytes(payload + [sum(payload) & 0xFF])
 
 
-def close_display(device: Optional[usb.core.Device]) -> None:
-    """Release and dispose of a previously opened USB device."""
+def close_display(device):
     if device is None:
         return
-
     try:
-        usb.util.release_interface(device, INTERFACE_NUMBER)
-    except usb.core.USBError:
-        pass
-
-    try:
+        try:
+            usb.util.release_interface(device, INTERFACE_NUMBER)
+        except usb.core.USBError:
+            pass
+        if getattr(device, '_flux_detached', False):
+            try:
+                device.attach_kernel_driver(INTERFACE_NUMBER)
+            except (usb.core.USBError, NotImplementedError):
+                pass
+    finally:
         usb.util.dispose_resources(device)
-    except usb.core.USBError:
-        pass
 
 
-def open_display() -> Optional[usb.core.Device]:
-    """Open and claim the Antec display USB interface."""
-    device = usb.core.find(
-        idVendor=VENDOR_ID,
-        idProduct=PRODUCT_ID,
-    )
-
+def open_display():
+    device = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
     if device is None:
         return None
-
+    device._flux_detached = False
     try:
-        if device.is_kernel_driver_active(INTERFACE_NUMBER):
-            device.detach_kernel_driver(INTERFACE_NUMBER)
-    except (usb.core.USBError, NotImplementedError):
-        pass
-
-    try:
-        device.set_configuration()
-    except usb.core.USBError as error:
-        # EBUSY usually means the device is already configured.
-        if getattr(error, "errno", None) not in (None, 16):
-            close_display(device)
-            raise
-
-    try:
+        try:
+            if device.is_kernel_driver_active(INTERFACE_NUMBER):
+                device.detach_kernel_driver(INTERFACE_NUMBER)
+                device._flux_detached = True
+        except NotImplementedError:
+            pass
+        try:
+            device.set_configuration()
+        except usb.core.USBError as error:
+            if error.errno != errno.EBUSY:
+                raise
+        interface = device.get_active_configuration()[(INTERFACE_NUMBER, 0)]
+        if not any(endpoint.bEndpointAddress == ENDPOINT_OUT for endpoint in interface):
+            raise ValueError('Antec display does not expose the expected USB OUT endpoint 0x03')
         usb.util.claim_interface(device, INTERFACE_NUMBER)
-    except usb.core.USBError:
+        return device
+    except BaseException:
         close_display(device)
         raise
 
-    return device
+
+def sample(settings):
+    return read_sensor(settings.cpu, 'cpu'), read_sensor(settings.gpu, 'gpu')
 
 
-def format_temperature(temperature: Optional[float]) -> str:
-    """Format a temperature for logging."""
-    return "--.-" if temperature is None else f"{temperature:.1f}"
-
-
-def main() -> int:
-    cpu_hwmon_path = find_hwmon_path("k10temp")
-    if cpu_hwmon_path is None:
-        print(
-            "ERROR: k10temp hwmon device not found. "
-            "Check whether the k10temp module is loaded.",
-            file=sys.stderr,
-        )
-        return 1
-
-    gpu_hwmon_path = find_hwmon_path("nvidia")
-    gpu_temperature_input_file = find_temperature_input_file(
-        gpu_hwmon_path,
-        ("gpu", "core", "edge"),
-    )
-    fallback_gpu_hwmon_path = None
-    fallback_gpu_temperature_input_file = "temp1_input"
-
-    if gpu_hwmon_path is None:
-        fallback_gpu_hwmon_path = find_hwmon_path("amdgpu")
-        fallback_gpu_temperature_input_file = find_temperature_input_file(
-            fallback_gpu_hwmon_path,
-            ("gpu", "core", "edge"),
-        )
-
-    print(f"CPU sensor: {cpu_hwmon_path}")
-
-    if gpu_hwmon_path is None:
-        print(
-            "WARNING: nvidia hwmon device not found. "
-            "Will try nvidia-smi before falling back.",
-            file=sys.stderr,
-        )
-
-        if fallback_gpu_hwmon_path is None:
-            print(
-                "WARNING: amdgpu fallback hwmon device not found. "
-                "GPU temperature will show --.- if nvidia-smi also fails.",
-                file=sys.stderr,
-            )
+def report_readings(readings, previous):
+    for name, reading in zip(('CPU', 'GPU'), readings):
+        status = (reading.source, reading.error,
+                  reading.temperature is not None and encode_temperature(reading.temperature) == [0xEE] * 3)
+        if previous.get(name) == status:
+            continue
+        previous[name] = status
+        if reading.error:
+            LOG.warning('%s unavailable: %s', name, reading.error)
+        elif status[2]:
+            LOG.warning('%s %.2f C cannot fit the display; showing --.-', name, reading.temperature)
         else:
-            print(
-                "Fallback GPU sensor: "
-                f"{fallback_gpu_hwmon_path}/"
-                f"{fallback_gpu_temperature_input_file}",
-                file=sys.stderr,
-            )
-    else:
-        print(f"GPU sensor: {gpu_hwmon_path}/{gpu_temperature_input_file}")
+            LOG.info('%s source: %s', name, reading.source)
 
+
+def run_display(settings, once=False):
     running = True
 
-    def handle_shutdown_signal(signum: int, _frame: object) -> None:
+    def stop(_signum, _frame):
         nonlocal running
-        print(f"\nReceived signal {signum}; stopping.")
         running = False
 
-    signal.signal(signal.SIGTERM, handle_shutdown_signal)
-    signal.signal(signal.SIGINT, handle_shutdown_signal)
-
-    device: Optional[usb.core.Device] = None
-
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    device = None
+    previous = {}
     try:
         while running:
-            if device is None:
-                try:
-                    device = open_display()
-                except usb.core.USBError as error:
-                    print(
-                        f"USB connection error: {error}",
-                        file=sys.stderr,
-                    )
-
-                if device is None:
-                    print(
-                        "Display 2022:0522 not available; retrying.",
-                        file=sys.stderr,
-                    )
-                    time.sleep(RECONNECT_INTERVAL_SECONDS)
-                    continue
-
-                print(
-                    f"Display connected: "
-                    f"{VENDOR_ID:04x}:{PRODUCT_ID:04x}"
-                )
-
-            cpu_temperature = read_temperature(
-                cpu_hwmon_path,
-                "temp1_input",
-            )
-            gpu_temperature = read_temperature(
-                gpu_hwmon_path,
-                gpu_temperature_input_file,
-            )
-            if gpu_temperature is None:
-                gpu_temperature = read_nvidia_smi_temperature()
-            if gpu_temperature is None:
-                gpu_temperature = read_temperature(
-                    fallback_gpu_hwmon_path,
-                    fallback_gpu_temperature_input_file,
-                )
-
-            packet = build_packet(
-                cpu_temperature,
-                gpu_temperature,
-            )
-
+            readings = sample(settings)
+            report_readings(readings, previous)
+            if once and any(r.temperature is None or encode_temperature(r.temperature) == [0xEE] * 3 for r in readings):
+                LOG.error('One-shot check failed; no USB write attempted')
+                return 1
             try:
-                bytes_written = device.write(
-                    ENDPOINT_OUT,
-                    packet,
-                    timeout=USB_WRITE_TIMEOUT_MS,
-                )
-
-                if bytes_written != len(packet):
-                    raise usb.core.USBError(
-                        f"Short USB write: {bytes_written}/{len(packet)} bytes"
-                    )
-            except usb.core.USBError as error:
-                print(
-                    f"USB write error: {error}; reconnecting.",
-                    file=sys.stderr,
-                )
+                if device is None:
+                    device = open_display()
+                    if device is None:
+                        if once:
+                            LOG.error('Antec display 2022:0522 not found')
+                            return 1
+                        if previous.get('usb') != 'missing':
+                            LOG.warning('Antec display missing; waiting for USB connection')
+                        previous['usb'] = 'missing'
+                        time.sleep(settings.reconnect_interval)
+                        continue
+                    previous['usb'] = 'connected'
+                    LOG.info('Connected to Antec display 2022:0522')
+                packet = build_packet(*(r.temperature for r in readings))
+                written = device.write(ENDPOINT_OUT, packet, timeout=USB_WRITE_TIMEOUT_MS)
+                if written != len(packet):
+                    raise usb.core.USBError(f'short USB write: {written}/{len(packet)}')
+                if once:
+                    LOG.info('One packet accepted: CPU %.1f C; GPU %.1f C', *(r.temperature for r in readings))
+                    return 0
+            except (usb.core.USBError, ValueError) as error:
+                LOG.warning('USB connection/write failed: %s', error)
                 close_display(device)
                 device = None
-                time.sleep(RECONNECT_INTERVAL_SECONDS)
+                if once:
+                    return 1
+                time.sleep(settings.reconnect_interval)
                 continue
-
-            time.sleep(UPDATE_INTERVAL_SECONDS)
-
+            time.sleep(settings.interval)
     finally:
         close_display(device)
-        print("Display service stopped.")
-
     return 0
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', type=Path, help='TOML config (default: /etc/antec-flux-display/config.toml if present)')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--list-sensors', action='store_true', help='List sensor identities as JSON without USB access')
+    mode.add_argument('--dry-run', action='store_true', help='Read sensors and print a packet without USB access')
+    mode.add_argument('--once', action='store_true', help='Send one live reading and exit; fail if either sensor is unavailable')
+    parser.add_argument('--gpu-pci', help='GPU PCI address, e.g. 0000:03:00.0')
+    parser.add_argument('--gpu-sensor', help='Exact temperature label, e.g. edge or junction')
+    parser.add_argument('--cpu-sensor', help='Exact CPU label, e.g. Tctl')
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    if args.list_sensors:
+        print(json.dumps(list_sensors(), indent=2))
+        return 0
+    try:
+        config_path = args.config if args.config else (DEFAULT_CONFIG if DEFAULT_CONFIG.exists() else None)
+        settings = load_settings(config_path)
+        if args.gpu_pci:
+            settings = replace(settings, gpu=replace(settings.gpu, pci_address=args.gpu_pci))
+        if args.gpu_sensor:
+            settings = replace(settings, gpu=replace(settings.gpu, label=args.gpu_sensor))
+        if args.cpu_sensor:
+            settings = replace(settings, cpu=replace(settings.cpu, label=args.cpu_sensor))
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    if args.dry_run:
+        readings = sample(settings)
+        packet = build_packet(*(r.temperature for r in readings))
+        print(json.dumps(dict(cpu=asdict(readings[0]), gpu=asdict(readings[1]), packet=packet.hex(' ')), indent=2))
+        return int(any(r.temperature is None or encode_temperature(r.temperature) == [0xEE] * 3 for r in readings))
+    global usb
+    try:
+        import usb.core
+        import usb.util
+    except ImportError:
+        parser.error('PyUSB is required; install python-pyusb (Arch/CachyOS) or python3-pyusb (Fedora)')
+    return run_display(settings, args.once)
+
+
+if __name__ == '__main__':
     raise SystemExit(main())
