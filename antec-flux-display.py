@@ -10,7 +10,7 @@ import logging
 import math
 from pathlib import Path
 import signal
-from threading import Event
+import time
 
 from flux_sensors import load_settings, read_sensor, list_sensors
 
@@ -107,17 +107,27 @@ def report_readings(readings, previous):
 
 
 def run_display(settings, once=False):
-    stopped = Event()
+    stopped = False
 
     def stop(_signum, _frame):
-        stopped.set()
+        nonlocal stopped
+        stopped = True
+
+    def wait(seconds):
+        deadline = time.monotonic() + seconds
+        while not stopped:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            # The signal handler only changes a flag; never acquire a lock there.
+            time.sleep(min(remaining, 0.25))
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     device = None
     previous = {}
     try:
-        while not stopped.is_set():
+        while not stopped:
             readings = sample(settings)
             report_readings(readings, previous)
             if once and any(r.temperature is None or encode_temperature(r.temperature) == [0xEE] * 3 for r in readings):
@@ -133,7 +143,7 @@ def run_display(settings, once=False):
                         if previous.get('usb') != 'missing':
                             LOG.warning('Antec display missing; waiting for USB connection')
                         previous['usb'] = 'missing'
-                        stopped.wait(settings.reconnect_interval)
+                        wait(settings.reconnect_interval)
                         continue
                     previous['usb'] = 'connected'
                     LOG.info('Connected to Antec display 2022:0522')
@@ -150,9 +160,9 @@ def run_display(settings, once=False):
                 device = None
                 if once:
                     return 1
-                stopped.wait(settings.reconnect_interval)
+                wait(settings.reconnect_interval)
                 continue
-            stopped.wait(settings.interval)
+            wait(settings.interval)
     finally:
         close_display(device)
     return 0

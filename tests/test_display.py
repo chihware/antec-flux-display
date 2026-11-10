@@ -178,13 +178,16 @@ class USBTests(unittest.TestCase):
         stop = {}
         def save_handler(signum, handler):
             stop[signum] = handler
-        def wait(_seconds):
+        now = [0.0]
+        def sleep(seconds):
+            now[0] += seconds
             if second.write.called:
                 stop[signal.SIGTERM](signal.SIGTERM, None)
         with patch.object(display, 'sample', return_value=self.readings), \
              patch.object(display, 'open_display', side_effect=[first, second]) as opened, \
              patch.object(display.signal, 'signal', side_effect=save_handler), \
-             patch.object(display.Event, 'wait', side_effect=wait):
+             patch.object(display.time, 'monotonic', side_effect=lambda: now[0]), \
+             patch.object(display.time, 'sleep', side_effect=sleep):
             self.assertEqual(display.run_display(sensors.Settings()), 0)
         self.assertEqual(opened.call_count, 2)
         self.assertEqual(self.fake.util.dispose_resources.call_count, 2)
@@ -224,10 +227,12 @@ class USBTests(unittest.TestCase):
         handlers = {}
         def save(signum, handler):
             handlers[signum] = handler
-        def wait(_):
+        now = [0.0]
+        def sleep(seconds):
+            now[0] += seconds
             if device.write.called:
                 handlers[signal.SIGTERM](signal.SIGTERM, None)
-        with patch.object(display, 'sample', return_value=self.readings), patch.object(display, 'open_display', side_effect=[None, device]) as opened, patch.object(display.signal, 'signal', side_effect=save), patch.object(display.Event, 'wait', side_effect=wait):
+        with patch.object(display, 'sample', return_value=self.readings), patch.object(display, 'open_display', side_effect=[None, device]) as opened, patch.object(display.signal, 'signal', side_effect=save), patch.object(display.time, 'monotonic', side_effect=lambda: now[0]), patch.object(display.time, 'sleep', side_effect=sleep):
             self.assertEqual(display.run_display(sensors.Settings()), 0)
         self.assertEqual(opened.call_count, 2)
         device.write.assert_called_once_with(3, display.build_packet(45, 52), timeout=1000)
